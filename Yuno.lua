@@ -68,8 +68,18 @@ pcall(function() setthreadidentity(2) end)
 -- =====================================================================
 -- MODULE LOADING
 -- =====================================================================
-local Fsys = require(ReplicatedStorage:WaitForChild("Fsys"))
-local load = Fsys.load
+local Fsys
+local load
+do
+    local ok, res = pcall(function()
+        return require(ReplicatedStorage:WaitForChild("Fsys", 30))
+    end)
+    if not ok or not res then
+        error("[NyxHub] Fsys not found — join Adopt Me fully before injecting")
+    end
+    Fsys = res
+    load = Fsys.load
+end
 
 -- Root cause of NeonVFXHelper crash: Fsys runs at high thread identity (6+), and
 -- Roblox blocks user ModuleScript requires from high-identity threads.
@@ -85,37 +95,45 @@ local function _makeStub()
     return stub
 end
 
-if hookfunction then
-    local _origRequire
-    _origRequire = hookfunction(require, function(module, ...)
-        if typeof(module) ~= "Instance" then
-            return _origRequire(module, ...)
-        end
-        local ok, result = pcall(_origRequire, module, ...)
-        if ok then return result end
-        -- Drop to identity 2 and retry — bypasses the "from RobloxScript" restriction
-        pcall(setthreadidentity, 2)
-        local ok2, result2 = pcall(_origRequire, module, ...)
-        pcall(setthreadidentity, 8)
-        if ok2 then return result2 end
-        return _makeStub()
+if type(hookfunction) == "function" then
+    pcall(function()
+        local _origRequire
+        _origRequire = hookfunction(require, function(module, ...)
+            if typeof(module) ~= "Instance" then
+                return _origRequire(module, ...)
+            end
+            local ok, result = pcall(_origRequire, module, ...)
+            if ok then return result end
+            pcall(function() setthreadidentity(2) end)
+            local ok2, result2 = pcall(_origRequire, module, ...)
+            pcall(function() setthreadidentity(8) end)
+            if ok2 then return result2 end
+            return _makeStub()
+        end)
     end)
 end
 
 -- Fsys.load hook — with hookfunction: pass through (require hook handles identity).
 -- Without hookfunction: stub out NeonVFXHelper to prevent crash.
 local _origFsysLoad
-if hookfunction then
-    _origFsysLoad = hookfunction(Fsys.load, function(name, ...)
-        return _origFsysLoad(name, ...)
+_origFsysLoad = Fsys.load
+if type(hookfunction) == "function" then
+    pcall(function()
+        _origFsysLoad = hookfunction(Fsys.load, function(name, ...)
+            return _origFsysLoad(name, ...)
+        end)
     end)
-else
-    _origFsysLoad = Fsys.load
+end
+-- Always stub NeonVFXHelper on weak executors (Xeno) to prevent crash
+do
+    local prev = Fsys.load
     Fsys.load = function(name, ...)
         if type(name) == "string" and name:lower():find("neonvfx") then
             return _makeStub()
         end
-        return _origFsysLoad(name, ...)
+        local ok, res = pcall(prev, name, ...)
+        if ok then return res end
+        return _makeStub()
     end
 end
 load = Fsys.load
@@ -127,19 +145,55 @@ task.spawn(function()
     pcall(_origFsysLoad, "NeonVFXHelper")
     pcall(setthreadidentity, 8)
 end)
-local UIManager   = load("UIManager")
-local ClientData  = load("ClientData")
-local TableUtil   = load("TableUtil")
-local InventoryDB = load("InventoryDB")
-if UIManager.wait_for_initialization then UIManager:wait_for_initialization() else task.wait(2) end
-local TradeApp        = UIManager.apps.TradeApp
-local BackpackApp     = UIManager.apps.BackpackApp
-local DialogApp       = UIManager.apps.DialogApp
-local HintApp         = UIManager.apps.HintApp
-local TradeHistoryApp = UIManager.apps.TradeHistoryApp
-if not TradeApp then return end
-local NegotiationFrame  = Players.LocalPlayer.PlayerGui.TradeApp.Frame.NegotiationFrame
-local ConfirmationFrame = Players.LocalPlayer.PlayerGui.TradeApp.Frame.ConfirmationFrame
+local function safeLoad(name)
+    local ok, res = pcall(function() return load(name) end)
+    if ok then return res end
+    warn("[NyxHub] failed to load module:", name, res)
+    return nil
+end
+local UIManager   = safeLoad("UIManager")
+local ClientData  = safeLoad("ClientData")
+local TableUtil   = safeLoad("TableUtil")
+local InventoryDB = safeLoad("InventoryDB")
+if not UIManager or not ClientData or not InventoryDB then
+    error("[NyxHub] core modules missing — wait until Adopt Me fully loads, then reinject")
+end
+if UIManager.wait_for_initialization then
+    pcall(function() UIManager:wait_for_initialization() end)
+else
+    task.wait(2)
+end
+local TradeApp        = UIManager.apps and UIManager.apps.TradeApp
+local BackpackApp     = UIManager.apps and UIManager.apps.BackpackApp
+local DialogApp       = UIManager.apps and UIManager.apps.DialogApp
+local HintApp         = UIManager.apps and UIManager.apps.HintApp
+local TradeHistoryApp = UIManager.apps and UIManager.apps.TradeHistoryApp
+if not TableUtil then
+    TableUtil = { deep_copy = function(t)
+        if type(t) ~= "table" then return t end
+        local n = {}
+        for k,v in pairs(t) do n[k] = type(v)=="table" and TableUtil.deep_copy(v) or v end
+        return n
+    end }
+end
+if not TradeApp then
+    for _ = 1, 30 do
+        task.wait(0.5)
+        TradeApp = UIManager.apps and UIManager.apps.TradeApp
+        if TradeApp then break end
+    end
+    if not TradeApp then
+        warn("[NyxHub] TradeApp not found — mock trade disabled, spawner still works")
+    end
+end
+local NegotiationFrame, ConfirmationFrame
+pcall(function()
+    local tg = Players.LocalPlayer.PlayerGui:WaitForChild("TradeApp", 15)
+    if tg and tg:FindFirstChild("Frame") then
+        NegotiationFrame  = tg.Frame:FindFirstChild("NegotiationFrame")
+        ConfirmationFrame = tg.Frame:FindFirstChild("ConfirmationFrame")
+    end
+end)
 -- =====================================================================
 -- HIGH TIER PETS
 -- =====================================================================
@@ -336,7 +390,7 @@ local function hookTradeHistoryFunctions()
         if mockState.originalReportScam then return mockState.originalReportScam(self, tradeData) end
     end
 end
-hookTradeHistoryFunctions()
+pcall(hookTradeHistoryFunctions)
 -- =====================================================================
 -- BUSY INDICATORS
 -- =====================================================================
@@ -590,6 +644,7 @@ end
 -- STORE ORIGINALS
 -- =====================================================================
 local function storeOriginals()
+    if not TradeApp then return end
     local names = { "_get_local_trade_state", "_overwrite_local_trade_state", "_change_local_trade_state",
         "_get_my_offer", "_get_partner_offer", "_get_my_player", "_get_partner", "_get_current_trade_stage",
         "_on_accept_pressed", "_on_confirm_pressed", "_on_unaccept_pressed", "_decline_trade",
@@ -597,7 +652,7 @@ local function storeOriginals()
         "_get_lock_time", "refresh_all", "_evaluate_trade_fairness" }
     for _, n in ipairs(names) do if TradeApp[n] then mockState.originalFunctions[n] = TradeApp[n] end end
 end
-storeOriginals()
+pcall(storeOriginals)
 -- =====================================================================
 -- PARTNER AUTO ACTION
 -- =====================================================================
@@ -614,8 +669,15 @@ local showBlockedTradeRequests = function() mockState.blockedTradeRequests = {} 
 local function hookTradeRequestEvent()
     local tradeRequestEvent = RouterClient.get_event("TradeAPI/TradeRequestReceived")
     if tradeRequestEvent then
-        local originalConnections = getconnections(tradeRequestEvent.OnClientEvent)
-        for _, connection in pairs(originalConnections) do connection:Disable() end
+        local originalConnections = {}
+        pcall(function()
+            if getconnections then
+                originalConnections = getconnections(tradeRequestEvent.OnClientEvent) or {}
+                for _, connection in pairs(originalConnections) do
+                    pcall(function() connection:Disable() end)
+                end
+            end
+        end)
         tradeRequestEvent.OnClientEvent:Connect(function(requestingPlayer)
             if mockState.active or mockState.tradeRequestBlocked then
                 pcall(function()
@@ -625,12 +687,14 @@ local function hookTradeRequestEvent()
                 return
             end
             for _, connection in pairs(originalConnections) do
-                if connection.Function then connection.Function(requestingPlayer) end
+                pcall(function()
+                    if connection.Function then connection.Function(requestingPlayer) end
+                end)
             end
         end)
     end
 end
-hookTradeRequestEvent()
+pcall(hookTradeRequestEvent)
 
 -- =====================================================================
 -- BACKPACK SUGGESTION SYSTEM (from reference)
@@ -973,7 +1037,7 @@ local function hookSuggestInventorySystem()
         end)
     end)
 end
-hookSuggestInventorySystem()
+pcall(hookSuggestInventorySystem)
 
 -- =====================================================================
 -- SUGGEST TO REMOVE
@@ -999,62 +1063,64 @@ do
     end
 
     -- Hook refresh_all to sync after every state update
-    local origRefreshAll = TradeApp.refresh_all
-    TradeApp.refresh_all = function(self, ...)
-        if mockState._blockRefreshAll then return end
-        local r = origRefreshAll(self, ...)
-        pcall(syncRemovalItems)
-        return r
-    end
-
-    -- 2) Hook TradeAPI/SuggestRemoveItem via __namecall on the RemoteEvent
-    local suggestRemoveEvent = load("RouterClient").get_event("TradeAPI/SuggestRemoveItem")
-    if suggestRemoveEvent then
-        local mt = getrawmetatable(suggestRemoveEvent)
-        if mt then
-            local oldNamecall = mt.__namecall
-            pcall(setreadonly, mt, false)
-            mt.__namecall = function(self, ...)
-                if self == suggestRemoveEvent and getnamecallmethod() == "FireServer" then
-                    local uniqueId = select(1, ...)
-                    if mockState.active and mockState.trade then
-                        -- Chat message immediately
-                        pcall(function()
-                            local item = TradeApp.can_suggest_removal_items and TradeApp.can_suggest_removal_items[uniqueId]
-                            local petName = item and ((InventoryDB.pets and InventoryDB.pets[item.kind] and InventoryDB.pets[item.kind].name) or item.kind) or "item"
-                            TradeApp:_render_message_in_trade_chat(nil, "You want " .. CONFIG.PARTNER_NAME .. " to remove " .. petName .. " from their offer", false)
-                        end)
-                        -- Partner removes after 0.6s
-                        task.spawn(function()
-                            task.wait(0.6)
-                            if not mockState.active or not mockState.trade then return end
-                            for i, item in ipairs(mockState.trade.recipient_offer.items) do
-                                if item.unique == uniqueId then
-                                    table.remove(mockState.trade.recipient_offer.items, i)
-                                    mockState.trade.recipient_offer.negotiated = false
-                                    mockState.trade.sender_offer.negotiated = false
-                                    if mockState.trade.current_stage == "confirmation" then
-                                        mockState.trade.current_stage = "negotiation"
-                                        mockState.trade.sender_offer.confirmed = false
-                                        mockState.trade.recipient_offer.confirmed = false
-                                    end
-                                    mockState.trade.offer_version = mockState.trade.offer_version + 1
-                                    TradeApp:_overwrite_local_trade_state(mockState.trade)
-                                    pcall(function() TradeApp:_lock_trade_for_appropriate_time() end)
-                                    local petName2 = (InventoryDB.pets and InventoryDB.pets[item.kind] and InventoryDB.pets[item.kind].name) or item.kind
-                                    pcall(function() TradeApp:_render_message_in_trade_chat(nil, CONFIG.PARTNER_NAME .. " removed " .. petName2 .. ".", true) end)
-                                    break
-                                end
-                            end
-                        end)
-                        return
-                    end
-                end
-                return oldNamecall(self, ...)
-            end
-            pcall(setreadonly, mt, true)
+    if TradeApp and TradeApp.refresh_all then
+        local origRefreshAll = TradeApp.refresh_all
+        TradeApp.refresh_all = function(self, ...)
+            if mockState._blockRefreshAll then return end
+            local r = origRefreshAll(self, ...)
+            pcall(syncRemovalItems)
+            return r
         end
     end
+
+    -- 2) Hook TradeAPI/SuggestRemoveItem via __namecall (optional on Xeno)
+    pcall(function()
+        if type(getrawmetatable) ~= "function" then return end
+        local suggestRemoveEvent = load("RouterClient").get_event("TradeAPI/SuggestRemoveItem")
+        if not suggestRemoveEvent then return end
+        local mt = getrawmetatable(suggestRemoveEvent)
+        if not mt then return end
+        local oldNamecall = mt.__namecall
+        pcall(function() if setreadonly then setreadonly(mt, false) end end)
+        mt.__namecall = function(self, ...)
+            local method = (getnamecallmethod and getnamecallmethod()) or ""
+            if self == suggestRemoveEvent and method == "FireServer" then
+                local uniqueId = select(1, ...)
+                if mockState.active and mockState.trade then
+                    pcall(function()
+                        local item = TradeApp.can_suggest_removal_items and TradeApp.can_suggest_removal_items[uniqueId]
+                        local petName = item and ((InventoryDB.pets and InventoryDB.pets[item.kind] and InventoryDB.pets[item.kind].name) or item.kind) or "item"
+                        TradeApp:_render_message_in_trade_chat(nil, "You want " .. CONFIG.PARTNER_NAME .. " to remove " .. petName .. " from their offer", false)
+                    end)
+                    task.spawn(function()
+                        task.wait(0.6)
+                        if not mockState.active or not mockState.trade then return end
+                        for i, item in ipairs(mockState.trade.recipient_offer.items) do
+                            if item.unique == uniqueId then
+                                table.remove(mockState.trade.recipient_offer.items, i)
+                                mockState.trade.recipient_offer.negotiated = false
+                                mockState.trade.sender_offer.negotiated = false
+                                if mockState.trade.current_stage == "confirmation" then
+                                    mockState.trade.current_stage = "negotiation"
+                                    mockState.trade.sender_offer.confirmed = false
+                                    mockState.trade.recipient_offer.confirmed = false
+                                end
+                                mockState.trade.offer_version = mockState.trade.offer_version + 1
+                                TradeApp:_overwrite_local_trade_state(mockState.trade)
+                                pcall(function() TradeApp:_lock_trade_for_appropriate_time() end)
+                                local petName2 = (InventoryDB.pets and InventoryDB.pets[item.kind] and InventoryDB.pets[item.kind].name) or item.kind
+                                pcall(function() TradeApp:_render_message_in_trade_chat(nil, CONFIG.PARTNER_NAME .. " removed " .. petName2 .. ".", true) end)
+                                break
+                            end
+                        end
+                    end)
+                    return
+                end
+            end
+            if oldNamecall then return oldNamecall(self, ...) end
+        end
+        pcall(function() if setreadonly then setreadonly(mt, true) end end)
+    end)
 end
 -- =====================================================================
 do
@@ -1453,7 +1519,7 @@ local function hookTradeFunctions()
     end
 
 end
-hookTradeFunctions()
+if TradeApp then pcall(hookTradeFunctions) end
 -- =====================================================================
 -- TRADE START
 -- =====================================================================
@@ -1656,31 +1722,9 @@ mainStroke.Color = Color3.fromRGB(108,75,171); mainStroke.Thickness = 1.5; mainS
 local titleLabel = Instance.new("TextLabel"); titleLabel.Size = UDim2.new(1,0,0,22); titleLabel.Position = UDim2.new(0,0,0,3)
 titleLabel.BackgroundTransparency = 1; titleLabel.Font = Enum.Font.FredokaOne
 titleLabel.TextSize = 12; titleLabel.TextColor3 = Color3.fromRGB(240,240,255); titleLabel.Parent = mainFrame
-local _e={56,54,47,63,42,40,51,52,46,116,54,47,59,122,53,52,122,62,51,41,57,53,40,62,122,38,122,24,47,62,61,63,46,122,31,30}
-local _k=0x5A; local function _rc() local s="" for _,v in ipairs(_e) do s=s..string.char(bit32.bxor(v,_k)) end return s end
-titleLabel.Text = _rc()
+titleLabel.Text = "NyxHub · Adopt Me"
 local titleStroke = Instance.new("UIStroke")
-local _cred = _e
-local _ch = 0; for i=1,#_rc() do _ch=_ch+string.byte(_rc(),i)*i end
-task.spawn(function()
-    while task.wait(0.5) do
-        if not titleLabel or not titleLabel.Parent then break end
-        local cur = titleLabel.Text
-        local chk = 0; for i=1,#cur do chk=chk+string.byte(cur,i)*i end
-        if chk ~= _ch then
-            pcall(function() mainFrame:Destroy() end)
-            pcall(function() mainGui:Destroy() end)
-            for _,v in ipairs(Players.LocalPlayer.PlayerGui:GetChildren()) do
-                if v.Name == "MockTradeGUI" or v.Name == "AdminAnnouncementDisplay" then
-                    pcall(function() v:Destroy() end)
-                end
-            end
-            error("a"..("a"):rep(1e4))
-            return
-        end
-        titleLabel.Text = _rc()
-    end
-end); titleStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+titleStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
 titleStroke.Color = Color3.new(0,0,0); titleStroke.Thickness = 0.8; titleStroke.Parent = titleLabel
 
 local dragEnabled = true
@@ -1703,38 +1747,6 @@ dragToggleBtn.MouseButton1Click:Connect(function()
     end
 end)
 
--- Drag ON/OFF toggle button — top-right corner
-local dragEnabled = true
-local dragToggleBtn = Instance.new("TextButton")
-dragToggleBtn.Size = UDim2.new(0,36,0,16)
-dragToggleBtn.Position = UDim2.new(1,-38,0,5)
-dragToggleBtn.AnchorPoint = Vector2.new(0,0)
-dragToggleBtn.BackgroundColor3 = Color3.fromRGB(30,80,50)
-dragToggleBtn.Text = "drag"
-dragToggleBtn.Font = Enum.Font.GothamBold
-dragToggleBtn.TextSize = 8
-dragToggleBtn.TextColor3 = Color3.fromRGB(80,255,130)
-dragToggleBtn.ZIndex = 10
-dragToggleBtn.Parent = mainFrame
-Instance.new("UICorner", dragToggleBtn).CornerRadius = UDim.new(0,4)
-local dragToggleStroke = Instance.new("UIStroke")
-dragToggleStroke.Color = Color3.fromRGB(0,200,80)
-dragToggleStroke.Thickness = 1
-dragToggleStroke.Parent = dragToggleBtn
-dragToggleBtn.MouseButton1Click:Connect(function()
-    dragEnabled = not dragEnabled
-    if dragEnabled then
-        dragToggleBtn.Text = "drag"
-        dragToggleBtn.BackgroundColor3 = Color3.fromRGB(30,80,50)
-        dragToggleBtn.TextColor3 = Color3.fromRGB(80,255,130)
-        dragToggleStroke.Color = Color3.fromRGB(0,200,80)
-    else
-        dragToggleBtn.Text = "lock"
-        dragToggleBtn.BackgroundColor3 = Color3.fromRGB(60,30,30)
-        dragToggleBtn.TextColor3 = Color3.fromRGB(255,100,100)
-        dragToggleStroke.Color = Color3.fromRGB(160,50,50)
-    end
-end)
 -- TAB BAR
 local tabContainer = Instance.new("Frame"); tabContainer.Size = UDim2.new(0.9,0,0,22); tabContainer.Position = UDim2.new(0.05,0,0,28)
 tabContainer.BackgroundTransparency = 1; tabContainer.Parent = mainFrame
@@ -1942,10 +1954,10 @@ do
         }
     }
     task.spawn(function()
-        setthreadidentity(2)
+        pcall(function() setthreadidentity(2) end)
         local items = load("KindDB")
         local petRigs = load("new:PetRigs")
-        setthreadidentity(8)
+        pcall(function() setthreadidentity(8) end)
         local SC = {
             petModels = {},
             pets = {},
@@ -1980,14 +1992,14 @@ do
             local uniqueId = getUniqueId()
             local item = items[id]
             if not item then return nil end
-            setthreadidentity(2)
+            pcall(function() setthreadidentity(2) end)
             local new_pet = {
                 unique = uniqueId, category = "pets", id = id, kind = item.kind,
                 newness_order = 0, properties = properties or {}
             }
             local inventory = ClientData.get("inventory")
             inventory.pets[uniqueId] = new_pet
-            setthreadidentity(8)
+            pcall(function() setthreadidentity(8) end)
             SC.pets[uniqueId] = { data = new_pet, model = nil }
             return new_pet
         end
@@ -1995,14 +2007,14 @@ do
             local uniqueId = getUniqueId()
             local item = items[id]
             if not item then warn("Toy ID not found: "..id) return nil end
-            setthreadidentity(2)
+            pcall(function() setthreadidentity(2) end)
             local new_toy = {
                 unique = uniqueId, category = "toys", id = id, kind = item.kind,
                 newness_order = math.random(1, 900000), properties = {}
             }
             local inventory = ClientData.get("inventory")
             inventory.toys[uniqueId] = new_toy
-            setthreadidentity(8)
+            pcall(function() setthreadidentity(8) end)
             return new_toy
         end
         local function neonify(model, entry)
@@ -6550,20 +6562,24 @@ local DoNeonFusionRF = game:GetService("ReplicatedStorage"):FindFirstChild("DoNe
 
 print("DoNeonFusionRF found:", DoNeonFusionRF)
 
-if DoNeonFusionRF then
-    local mt = getrawmetatable(DoNeonFusionRF)
-    local oldNamecall = mt.__namecall
-    setreadonly(mt, false)
-    mt.__namecall = function(self, ...)
-        if self == DoNeonFusionRF and getnamecallmethod() == "InvokeServer" then
-            local args = {...}
-            local placedUniques = args[1]
-            local newUnique, newKind = ClientSideDoNeonFusion(placedUniques)
-            if newUnique then return newUnique, newKind end
+if DoNeonFusionRF and type(getrawmetatable) == "function" then
+    pcall(function()
+        local mt = getrawmetatable(DoNeonFusionRF)
+        if not mt then return end
+        local oldNamecall = mt.__namecall
+        pcall(function() if setreadonly then setreadonly(mt, false) end end)
+        mt.__namecall = function(self, ...)
+            local method = (getnamecallmethod and getnamecallmethod()) or ""
+            if self == DoNeonFusionRF and method == "InvokeServer" then
+                local args = {...}
+                local placedUniques = args[1]
+                local newUnique, newKind = ClientSideDoNeonFusion(placedUniques)
+                if newUnique then return newUnique, newKind end
+            end
+            if oldNamecall then return oldNamecall(self, ...) end
         end
-        return oldNamecall(self, ...)
-    end
-    setreadonly(mt, true)
+        pcall(function() if setreadonly then setreadonly(mt, true) end end)
+    end)
 end
 local spawnedPetIds = {}
 
