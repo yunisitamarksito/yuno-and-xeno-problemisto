@@ -1,11 +1,4 @@
--- =====================================================================
--- NyxHub — Adopt Me Fake Trade + Pet Spawner (Xeno / PC Executor Compatible)
--- Inject with Xeno, Wave, Solara, or any PC executor that supports:
---   hookfunction, setthreadidentity, getrawmetatable, getconnections, request/HttpGet
--- Run in Adopt Me only.
--- =====================================================================
 
--- Executor compatibility layer (Xeno PC + common alternatives)
 do
     local env = (getgenv and getgenv()) or _G
     -- request polyfill
