@@ -1,6 +1,12 @@
+--[[
+    OMNI XENO PC - Adopt Me Complete Hub
+    Xeno/Fluxus PC Compatible (Level 2)
+    Features: Fake Trades, Pet Spawner, Chat, Spinner, Block Player
+    Based on milo fake trade (3).txt - Rewritten for Xeno PC
+]]
 
 -- =====================================================================
--- CORE SETUP
+-- CORE SETUP (Level 2 Compatible)
 -- =====================================================================
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -14,75 +20,12 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 
 -- =====================================================================
--- IDENTITY FIX (Required for Xeno PC)
--- =====================================================================
-local function setIdentity(level)
-    pcall(function()
-        if setthreadidentity then
-            setthreadidentity(level)
-        elseif setidentity then
-            setidentity(level)
-        end
-    end)
-end
-setIdentity(2)
-
--- =====================================================================
--- LOAD MODULES
+-- LOAD MODULES (Level 2 Compatible)
 -- =====================================================================
 local Fsys = ReplicatedStorage:WaitForChild("Fsys")
 local function load(name)
     return Fsys.load(name)
 end
-
--- NeonVFXHelper Crash Fix
-local function _makeStub()
-    local stub
-    stub = setmetatable({}, {
-        __index = function(_, _k) return function(...) return stub end end,
-        __call = function(_, ...) return stub end,
-        __newindex = function() end,
-    })
-    return stub
-end
-
-if hookfunction then
-    local _origRequire
-    _origRequire = hookfunction(require, function(module, ...)
-        if typeof(module) ~= "Instance" then
-            return _origRequire(module, ...)
-        end
-        local ok, result = pcall(_origRequire, module, ...)
-        if ok then return result end
-        pcall(setthreadidentity, 2)
-        local ok2, result2 = pcall(_origRequire, module, ...)
-        pcall(setthreadidentity, 8)
-        if ok2 then return result2 end
-        return _makeStub()
-    end)
-end
-
-local _origFsysLoad
-if hookfunction then
-    _origFsysLoad = hookfunction(Fsys.load, function(name, ...)
-        return _origFsysLoad(name, ...)
-    end)
-else
-    _origFsysLoad = Fsys.load
-    Fsys.load = function(name, ...)
-        if type(name) == "string" and name:lower():find("neonvfx") then
-            return _makeStub()
-        end
-        return _origFsysLoad(name, ...)
-    end
-end
-
-task.spawn(function()
-    task.wait(1)
-    pcall(setthreadidentity, 2)
-    pcall(_origFsysLoad, "NeonVFXHelper")
-    pcall(setthreadidentity, 8)
-end)
 
 local UIManager = load("UIManager")
 local ClientData = load("ClientData")
@@ -101,7 +44,6 @@ local TradeApp = UIManager.apps.TradeApp
 local BackpackApp = UIManager.apps.BackpackApp
 local DialogApp = UIManager.apps.DialogApp
 local HintApp = UIManager.apps.HintApp
-local TradeHistoryApp = UIManager.apps.TradeHistoryApp
 
 if not TradeApp then
     warn("TradeApp not found - waiting...")
@@ -111,7 +53,6 @@ if not TradeApp then
 end
 
 local NegotiationFrame = LocalPlayer.PlayerGui.TradeApp.Frame.NegotiationFrame
-local ConfirmationFrame = LocalPlayer.PlayerGui.TradeApp.Frame.ConfirmationFrame
 
 -- =====================================================================
 -- HIGH TIER PETS
@@ -139,9 +80,6 @@ local CONFIG = {
     AUTO_CONFIRM_DELAY = 1.5,
     SPECTATOR_COUNT = 0,
     AUTO_PARTNER = true,
-    NEGOTIATION_LOCK = 5,
-    CONFIRMATION_LOCK_PER_ITEM = 3,
-    FRIEND_PARTNER = true,
 }
 
 -- =====================================================================
@@ -155,17 +93,10 @@ local mockState = {
     tradeCompleting = false,
     scamWarningShown = true,
     originalFunctions = {},
-    tradeHistory = {},
-    addedTradeIds = {},
-    blockedTradeRequests = {},
-    pendingTradeRequest = false,
-    canShowTradeRequest = true,
-    tradeRequestBlocked = false,
-    isMockTradeDialog = false,
 }
 
 -- =====================================================================
--- MOCK PARTNER
+-- FAKE PARTNER
 -- =====================================================================
 local mockPartner
 local function createMockPartner()
@@ -176,25 +107,16 @@ local function createMockPartner()
         ClassName = "Player",
         AccountAge = 365,
         MembershipType = Enum.MembershipType.None,
-        Neutral = true,
         TeamColor = BrickColor.new("White"),
-        CharacterAdded = Instance.new("BindableEvent"),
-        CharacterRemoving = Instance.new("BindableEvent"),
     }, {
         __index = function(t, k)
             if k == "Parent" then return Players end
             if k == "IsA" then return function(_, c) return c == "Player" or c == "Instance" end end
-            if k == "GetAttribute" then return function() return nil end end
             if k == "FindFirstChild" then return function() return nil end end
             if k == "WaitForChild" then return function() return nil end end
             return rawget(t, k)
         end,
         __tostring = function() return CONFIG.PARTNER_NAME end,
-        __eq = function(a, b)
-            if type(b) == "table" then return rawget(a, "UserId") == rawget(b, "UserId") end
-            local ok, uid = pcall(function() return b.UserId end)
-            return ok and uid and rawget(a, "UserId") == uid or false
-        end,
     })
     return mockPartner
 end
@@ -231,42 +153,7 @@ local function createMockTrade()
 end
 
 -- =====================================================================
--- TRADE HISTORY
--- =====================================================================
-local function createTradeHistoryRecord(trade)
-    return {
-        trade_id = trade.trade_id,
-        timestamp = os.time(),
-        sender_user_id = LocalPlayer.UserId,
-        sender_name = LocalPlayer.Name,
-        sender_items = TableUtil.deep_copy(trade.sender_offer.items),
-        recipient_user_id = trade.recipient.UserId,
-        recipient_name = CONFIG.PARTNER_NAME,
-        recipient_items = TableUtil.deep_copy(trade.recipient_offer.items),
-        reported = false,
-        reverted = nil,
-    }
-end
-
-local function appendToTradeHistory(record)
-    if mockState.addedTradeIds[record.trade_id] then return end
-    mockState.addedTradeIds[record.trade_id] = true
-    table.insert(mockState.tradeHistory, record)
-end
-
--- =====================================================================
--- BUSY INDICATORS
--- =====================================================================
-local function update_busy_indicators(val)
-    pcall(function()
-        local partnerUserId = tostring(CONFIG.PARTNER_USER_ID)
-        mockState.trade.busy_indicators[partnerUserId] = val
-        TradeApp.partner_negotiation_offer_pane:display_busy(val)
-    end)
-end
-
--- =====================================================================
--- ADD PET TO PARTNER OFFER
+-- ADD PET TO PARTNER OFFER (Level 2 Compatible)
 -- =====================================================================
 local function generateRandomFlags()
     local roll = math.random(1, 10)
@@ -283,31 +170,12 @@ local function generateRandomFlags()
     end
 end
 
-local function getRandomAge(flags)
-    if flags.M or flags.N then
-        local ages = {1, 1, 2, 2, 3, 4, 5, 6}
-        return ages[math.random(1, #ages)]
-    else
-        local ages = {1, 2, 3, 4, 5, 6, 6, 6}
-        return ages[math.random(1, #ages)]
-    end
-end
-
 local function addPetToPartnerOffer(petName, flags)
     if not mockState.active or not mockState.trade then return false end
     if mockState.trade.current_stage == "confirmation" then return false end
     if #mockState.trade.recipient_offer.items >= 18 then return false end
 
-    update_busy_indicators({ picking = true })
-    task.wait(0.5)
-
-    if not mockState.active or not mockState.trade then
-        update_busy_indicators({ picking = false })
-        return false
-    end
-
     local petFlags = flags or generateRandomFlags()
-    local age = getRandomAge(petFlags)
 
     for catName, catTable in pairs(InventoryDB) do
         if catName == "pets" then
@@ -322,7 +190,7 @@ local function addPetToPartnerOffer(petName, flags)
                             rideable = petFlags.R,
                             neon = petFlags.N,
                             mega_neon = petFlags.M,
-                            age = age,
+                            age = 6,
                         }
                     }
                     table.insert(mockState.trade.recipient_offer.items, petItem)
@@ -338,22 +206,15 @@ local function addPetToPartnerOffer(petName, flags)
                     mockState.trade.offer_version = mockState.trade.offer_version + 1
                     TradeApp:_overwrite_local_trade_state(mockState.trade)
                     pcall(function()
-                        if TradeApp._lock_trade_for_appropriate_time then
-                            TradeApp:_lock_trade_for_appropriate_time()
-                        end
-                    end)
-                    pcall(function()
                         if TradeApp._render_message_in_trade_chat then
                             TradeApp:_render_message_in_trade_chat(nil, CONFIG.PARTNER_NAME .. " added " .. petName .. ".", true)
                         end
                     end)
-                    update_busy_indicators({ picking = false })
                     return true
                 end
             end
         end
     end
-    update_busy_indicators({ picking = false })
     return false
 end
 
@@ -364,10 +225,6 @@ local function partnerAutoAction()
     if not mockState.active or not mockState.trade or mockState.partnerActionPending then return end
     mockState.partnerActionPending = true
 
-    while TradeApp.lock_countdown and TradeApp.lock_countdown.is_going and TradeApp.lock_countdown:is_going() do
-        task.wait(0.1)
-    end
-
     if mockState.trade and mockState.trade.current_stage == "negotiation" then
         task.wait(CONFIG.AUTO_ACCEPT_DELAY)
         if mockState.active and mockState.trade then
@@ -376,16 +233,6 @@ local function partnerAutoAction()
                 mockState.trade.current_stage = "confirmation"
                 mockState.trade.offer_version = mockState.trade.offer_version + 1
                 TradeApp:_overwrite_local_trade_state(mockState.trade)
-                pcall(function()
-                    if TradeApp._evaluate_trade_fairness then
-                        TradeApp:_evaluate_trade_fairness()
-                    end
-                end)
-                pcall(function()
-                    if TradeApp._lock_trade_for_appropriate_time then
-                        TradeApp:_lock_trade_for_appropriate_time()
-                    end
-                end)
             else
                 mockState.trade.offer_version = mockState.trade.offer_version + 1
                 TradeApp:_overwrite_local_trade_state(mockState.trade)
@@ -401,8 +248,6 @@ local function partnerAutoAction()
             if mockState.trade.sender_offer.confirmed and not mockState.tradeCompleting then
                 mockState.tradeCompleting = true
                 task.wait(3)
-                local record = createTradeHistoryRecord(mockState.trade)
-                appendToTradeHistory(record)
 
                 local receivedItems = {}
                 for _, item in ipairs(mockState.trade.recipient_offer.items) do
@@ -413,9 +258,7 @@ local function partnerAutoAction()
                 end
 
                 task.spawn(function()
-                    setIdentity(2)
                     local inv = ClientData.get("inventory")
-                    setIdentity(8)
                     if inv and inv.pets then
                         for _, item in ipairs(receivedItems) do
                             local kindKey = item.kind
@@ -429,12 +272,10 @@ local function partnerAutoAction()
                                 properties = item.properties,
                                 _source = "mock_trade_gui",
                             }
-                            setIdentity(2)
                             local inv2 = ClientData.get("inventory")
                             if inv2 and inv2.pets then
                                 inv2.pets[uid] = itemData
                             end
-                            setIdentity(8)
                         end
                     end
                     pcall(function() UIManager.apps.BackpackApp:refresh_rendered_items() end)
@@ -466,8 +307,6 @@ local function startMockTradeDirectly()
         mockState.partnerActionPending = false
         mockState.tradeCompleting = false
         mockState.scamWarningShown = true
-        mockState.tradeRequestBlocked = true
-        mockState.blockedTradeRequests = {}
 
         mockPartner = createMockPartner()
         mockState.trade = createMockTrade()
@@ -477,11 +316,6 @@ local function startMockTradeDirectly()
         task.wait(0.02)
         pcall(function() TradeApp:_overwrite_local_trade_state(mockState.trade) end)
         pcall(function() UIManager.set_app_visibility("TradeApp", true) end)
-        pcall(function()
-            if TradeApp._show_intro_message then
-                TradeApp:_show_intro_message()
-            end
-        end)
         task.wait(0.02)
         pcall(function()
             if TradeApp.refresh_all then
@@ -504,16 +338,6 @@ local function doPartnerAccept()
         mockState.trade.recipient_offer.negotiated = true
         if mockState.trade.sender_offer.negotiated then
             mockState.trade.current_stage = "confirmation"
-            pcall(function()
-                if TradeApp._evaluate_trade_fairness then
-                    TradeApp:_evaluate_trade_fairness()
-                end
-            end)
-            pcall(function()
-                if TradeApp._lock_trade_for_appropriate_time then
-                    TradeApp:_lock_trade_for_appropriate_time()
-                end
-            end)
         end
         mockState.trade.offer_version = mockState.trade.offer_version + 1
         TradeApp:_overwrite_local_trade_state(mockState.trade)
@@ -547,7 +371,7 @@ local function doPartnerUnaccept()
 end
 
 -- =====================================================================
--- BLOCK PLAYER
+-- BLOCK PLAYER (Level 2 Compatible)
 -- =====================================================================
 local function doBlockPlayer()
     local targetPlayer = Players:FindFirstChild(CONFIG.PARTNER_NAME)
@@ -559,17 +383,13 @@ local function doBlockPlayer()
     end
 
     task.spawn(function()
-        setIdentity(8)
         StarterGui:SetCore('PromptBlockPlayer', targetPlayer)
         local startTime = tick()
         local modal = nil
 
         while not modal do
             RunService.Heartbeat:Wait()
-            if tick() - startTime > 10 then
-                setIdentity(2)
-                return
-            end
+            if tick() - startTime > 10 then return end
             local overlay = CoreGui:FindFirstChild('FoundationOverlay')
             if overlay then
                 modal = overlay:FindFirstChild("BlockingModalScreen", true)
@@ -630,17 +450,12 @@ local function doBlockPlayer()
                             end
                         end
                     end
-                    if not blockBtn then
-                        blockBtn = buttonsContainer:FindFirstChild('3')
-                    end
                 end
             end)
         end
 
         if blockBtn then
-            local attempts = 0
-            while attempts < 20 do
-                attempts = attempts + 1
+            for attempts = 1, 20 do
                 pcall(function() game:GetService('GuiService').SelectedObject = blockBtn end)
                 task.wait()
                 pcall(function()
@@ -659,16 +474,6 @@ local function doBlockPlayer()
                     task.wait()
                     VirtualInputManager:SendMouseButtonEvent(cx, cy, 0, false, game, 1)
                 end)
-                pcall(function()
-                    if firesignal then
-                        firesignal(blockBtn.MouseButton1Click)
-                    end
-                end)
-                pcall(function()
-                    if fireclick then
-                        fireclick(blockBtn)
-                    end
-                end)
                 task.wait(0.2)
 
                 local overlay = CoreGui:FindFirstChild('FoundationOverlay')
@@ -676,33 +481,16 @@ local function doBlockPlayer()
                     break
                 end
             end
-            pcall(function() game:GetService('GuiService').SelectedObject = nil end)
         end
 
         pcall(function()
-            if posConn then
-                posConn:Disconnect()
-            end
+            if posConn then posConn:Disconnect() end
         end)
-
-        local timeout = tick() + 10
-        while tick() < timeout do
-            local overlay = CoreGui:FindFirstChild('FoundationOverlay')
-            if not overlay or not overlay:FindFirstChild("BlockingModalScreen", true) then
-                break
-            end
-            RunService.Heartbeat:Wait()
-        end
-
-        setIdentity(2)
-        if HintApp then
-            HintApp:hint({ text = "Blocked " .. CONFIG.PARTNER_NAME, length = 2, overridable = true })
-        end
     end)
 end
 
 -- =====================================================================
--- PET SPAWNER FUNCTIONS
+-- PET SPAWNER FUNCTIONS (Level 2 Compatible)
 -- =====================================================================
 local function findPetKind(name)
     for catName, catTable in pairs(InventoryDB) do
@@ -732,12 +520,10 @@ local function createInventoryItem(itemId, category, properties)
         _source = "omni_xeno_pc",
     }
 
-    setIdentity(2)
     local inv = ClientData.get("inventory")
     if inv and inv[category] then
         inv[category][uniqueId] = itemData
     end
-    setIdentity(8)
 
     task.defer(function()
         pcall(function() UIManager.apps.BackpackApp:refresh_rendered_items() end)
@@ -751,12 +537,11 @@ end
 -- =====================================================================
 local function storeOriginals()
     local names = {
-        "_get_local_trade_state", "_overwrite_local_trade_state", "_change_local_trade_state",
+        "_get_local_trade_state", "_overwrite_local_trade_state",
         "_get_my_offer", "_get_partner_offer", "_get_my_player", "_get_partner",
         "_get_current_trade_stage", "_on_accept_pressed", "_on_confirm_pressed",
         "_on_unaccept_pressed", "_decline_trade", "_add_item_to_my_offer",
-        "_remove_item_from_my_offer", "_lock_trade_for_appropriate_time",
-        "_get_lock_time", "refresh_all", "_evaluate_trade_fairness"
+        "_remove_item_from_my_offer", "refresh_all",
     }
     for _, n in ipairs(names) do
         if TradeApp[n] then
@@ -767,7 +552,7 @@ end
 storeOriginals()
 
 -- =====================================================================
--- HOOK TRADE FUNCTIONS
+-- HOOK TRADE FUNCTIONS (Level 2 Compatible - No metatable hooks)
 -- =====================================================================
 local function hookTradeFunctions()
     TradeApp._get_local_trade_state = function(self)
@@ -778,7 +563,6 @@ local function hookTradeFunctions()
     end
 
     TradeApp._overwrite_local_trade_state = function(self, newState)
-        if mockState._blockRefreshAll then return end
         if mockState.active then
             if newState then
                 mockState.trade = newState
@@ -848,35 +632,6 @@ local function hookTradeFunctions()
         return mockState.originalFunctions._get_current_trade_stage(self)
     end
 
-    TradeApp._get_lock_time = function(self)
-        if mockState.active and mockState.trade then
-            if self:_get_current_trade_stage() == "negotiation" then
-                return CONFIG.NEGOTIATION_LOCK
-            else
-                return math.clamp(
-                    CONFIG.CONFIRMATION_LOCK_PER_ITEM *
-                    (#mockState.trade.sender_offer.items + #mockState.trade.recipient_offer.items),
-                    5, 15
-                )
-            end
-        end
-        return mockState.originalFunctions._get_lock_time(self)
-    end
-
-    TradeApp._lock_trade_for_appropriate_time = function(self)
-        if mockState.active then
-            pcall(function()
-                if self.lock_countdown then
-                    self.lock_countdown:stop()
-                    self.lock_countdown:set_duration(self:_get_lock_time())
-                    self.lock_countdown:start()
-                end
-            end)
-        else
-            return mockState.originalFunctions._lock_trade_for_appropriate_time(self)
-        end
-    end
-
     TradeApp._add_item_to_my_offer = function(self)
         if mockState.active and mockState.trade then
             if mockState.isAddingItem then return end
@@ -908,7 +663,6 @@ local function hookTradeFunctions()
 
                     mockState.trade.offer_version = mockState.trade.offer_version + 1
                     pcall(function() self:_overwrite_local_trade_state(mockState.trade) end)
-                    pcall(function() self:_lock_trade_for_appropriate_time() end)
                 end
             end
             mockState.isAddingItem = false
@@ -934,11 +688,6 @@ local function hookTradeFunctions()
 
                     mockState.trade.offer_version = mockState.trade.offer_version + 1
                     self:_overwrite_local_trade_state(mockState.trade)
-                    pcall(function()
-                        if self._lock_trade_for_appropriate_time then
-                            self:_lock_trade_for_appropriate_time()
-                        end
-                    end)
                     break
                 end
             end
@@ -959,20 +708,13 @@ local function hookTradeFunctions()
                     mockState.trade.current_stage = "confirmation"
                     mockState.trade.offer_version = mockState.trade.offer_version + 1
                     self:_overwrite_local_trade_state(mockState.trade)
-                    pcall(function()
-                        if TradeApp._evaluate_trade_fairness then
-                            TradeApp:_evaluate_trade_fairness()
-                        end
-                    end)
-                    pcall(function()
-                        if TradeApp._lock_trade_for_appropriate_time then
-                            TradeApp:_lock_trade_for_appropriate_time()
-                        end
-                    end)
                 else
                     mockState.trade.offer_version = mockState.trade.offer_version + 1
                     self:_overwrite_local_trade_state(mockState.trade)
                 end
+            end
+            if CONFIG.AUTO_PARTNER and not mockState.trade.recipient_offer.negotiated and mockState.trade.sender_offer.negotiated then
+                task.spawn(partnerAutoAction)
             end
         else
             return mockState.originalFunctions._on_accept_pressed(self)
@@ -984,6 +726,9 @@ local function hookTradeFunctions()
             mockState.trade.sender_offer.confirmed = true
             mockState.trade.offer_version = mockState.trade.offer_version + 1
             self:_overwrite_local_trade_state(mockState.trade)
+            if CONFIG.AUTO_PARTNER and not mockState.trade.recipient_offer.confirmed then
+                task.spawn(partnerAutoAction)
+            end
         else
             return mockState.originalFunctions._on_confirm_pressed(self)
         end
@@ -1012,22 +757,6 @@ local function hookTradeFunctions()
 
     TradeApp._decline_trade = function(self, silent)
         if mockState.active then
-            if mockState.trade and mockState.trade.current_stage == "confirmation" and not silent then
-                if mockState.tradeCompleting or
-                   (mockState.trade.sender_offer.confirmed and mockState.trade.recipient_offer.confirmed) then
-                    return
-                end
-                mockState.trade.sender_offer.confirmed = false
-                mockState.trade.recipient_offer.confirmed = false
-                mockState.trade.offer_version = mockState.trade.offer_version + 1
-                mockState.partnerActionPending = false
-                mockState.tradeCompleting = false
-                self:_overwrite_local_trade_state(mockState.trade)
-                pcall(function() self:_cancel_infinite_confirmation_detection() end)
-                pcall(function() self:_set_confirmation_arrow_rotating(false) end)
-                pcall(function() self:_refresh_lock_related_ui() end)
-                return
-            end
             pcall(function() if self.lock_countdown then self.lock_countdown:stop() end end)
             mockState.active = false
             mockState.trade = nil
@@ -1043,216 +772,8 @@ local function hookTradeFunctions()
             return mockState.originalFunctions._decline_trade(self, silent)
         end
     end
-
-    TradeApp._evaluate_trade_fairness = function(self)
-        if mockState.active and mockState.trade and not mockState.scamWarningShown then
-            local myItems = #mockState.trade.sender_offer.items
-            local partnerItems = #mockState.trade.recipient_offer.items
-            if myItems > 0 and partnerItems == 0 then
-                mockState.scamWarningShown = true
-                if DialogApp then
-                    DialogApp:dialog({ text = "This trade seems unbalanced. Be careful!", button = "Next", yields = false })
-                    DialogApp:dialog({ text = "Any items lost to scams WILL NOT be returned!", button = "I understand", yields = false })
-                end
-            end
-        else
-            if mockState.originalFunctions._evaluate_trade_fairness then
-                return mockState.originalFunctions._evaluate_trade_fairness(self)
-            end
-        end
-    end
 end
 hookTradeFunctions()
-
--- =====================================================================
--- SELF BADGE
--- =====================================================================
-local BADGE_IMAGE = "rbxassetid://4184878149"
-local SUGGEST_BTN_TEXT = "Suggest"
-local BADGE_ICON_ENABLED = true
-
-do
-    local function lockIcon(icon, anchorPoint, position, size)
-        if not icon then return end
-        size = size or 30
-        icon.Image = BADGE_IMAGE
-        icon.Visible = BADGE_ICON_ENABLED
-        icon.ImageTransparency = 0
-        icon.ImageColor3 = Color3.new(1, 1, 1)
-        icon.Size = UDim2.new(0, size, 0, size)
-        icon.AnchorPoint = anchorPoint
-        icon.Position = position
-        icon:GetPropertyChangedSignal("Image"):Connect(function()
-            if icon.Image ~= BADGE_IMAGE then
-                icon.Image = BADGE_IMAGE
-            end
-        end)
-        icon:GetPropertyChangedSignal("Visible"):Connect(function()
-            if BADGE_ICON_ENABLED and not icon.Visible then
-                icon.Visible = true
-            end
-        end)
-    end
-
-    task.spawn(function()
-        local tradeGui = LocalPlayer.PlayerGui:WaitForChild("TradeApp", 30)
-        if not tradeGui then return end
-
-        local negApplied = false
-        local cfApplied = false
-
-        while true do
-            task.wait(0.05)
-            if not (mockState and mockState.active) then
-                negApplied = false
-                cfApplied = false
-                continue
-            end
-
-            if not negApplied then
-                local negIcon = tradeGui.Frame.NegotiationFrame.Header.YouFrame:FindFirstChild("Icon")
-                if negIcon then
-                    lockIcon(negIcon, Vector2.new(0, 0.5), UDim2.new(0, 0, 0.5, -2))
-                    negApplied = true
-                end
-            end
-
-            if not cfApplied and tradeGui.Frame.ConfirmationFrame.Visible then
-                local cfIcon = tradeGui.Frame.ConfirmationFrame:FindFirstChild("YouIcon")
-                if cfIcon then
-                    lockIcon(cfIcon, cfIcon.AnchorPoint, cfIcon.Position, 21)
-                    cfApplied = true
-                end
-            end
-        end
-    end)
-end
-
--- =====================================================================
--- REACTIONS
--- =====================================================================
-local _EmojiSpring = nil
-pcall(function() _EmojiSpring = load("Spring") end)
-local _emojiReactionFrame = nil
-local _emojiReactions = {}
-pcall(function()
-    _emojiReactions = require(ReplicatedStorage.ClientModules.CloudValues):getValue("player_chat", "trade_spectate_reactions") or {}
-end)
-
-do
-    local origInit = TradeApp._initialize_spectate
-    if origInit then
-        TradeApp._initialize_spectate = function(self, ...)
-            local r = origInit(self, ...)
-            pcall(function()
-                if self.spectate_frame then
-                    _emojiReactionFrame = self.spectate_frame:FindFirstChild("ReactionFrame")
-                end
-            end)
-            return r
-        end
-    end
-end
-
-local function _spawnReaction(imageId)
-    local rf = _emojiReactionFrame
-    if not rf and TradeApp.spectate_frame then
-        rf = TradeApp.spectate_frame:FindFirstChild("ReactionFrame")
-    end
-    if not rf then
-        local tradeGui = LocalPlayer.PlayerGui:FindFirstChild("TradeApp")
-        if tradeGui then
-            for _, desc in ipairs(tradeGui:GetDescendants()) do
-                if desc.Name == "ReactionFrame" and desc:IsA("Frame") then
-                    rf = desc
-                    break
-                end
-            end
-        end
-    end
-    if not rf then return end
-
-    local tmpl = rf:FindFirstChild("ReactionTemplate")
-    local emoji
-    if tmpl then
-        emoji = tmpl:Clone()
-    else
-        emoji = Instance.new("ImageLabel")
-        emoji.Name = "ReactionTemplate"
-        emoji.BackgroundTransparency = 1
-        emoji.AnchorPoint = Vector2.new(0.5, 0.5)
-    end
-
-    emoji.Image = imageId
-    emoji.Parent = rf
-    emoji.ImageTransparency = 1
-    emoji.Size = UDim2.fromScale(0, 0)
-
-    TweenService:Create(emoji, TweenInfo.new(0.4, Enum.EasingStyle.Sine, Enum.EasingDirection.In), {
-        ImageTransparency = 0,
-        Size = UDim2.fromOffset(48, 48)
-    }):Play()
-
-    local rng = Random.new()
-    local totalDur = rng:NextNumber(2, 3.5)
-    local vertSpeed = rng:NextNumber(0.23, 0.29)
-    local fadeStart = totalDur * rng:NextNumber(0.65, 0.8)
-    local xPos = rng:NextNumber(0.35, 0.45)
-    local xGoal = rng:NextNumber(0.1, 0.9)
-    local spring = _EmojiSpring and _EmojiSpring.new(xPos, rng:NextNumber(1.1, 1.25), -0.5) or nil
-    if spring then
-        spring:set_goal(xGoal)
-    end
-
-    emoji.Position = UDim2.fromScale(-0.5, 1.0)
-    local startTick = tick()
-    local c
-    c = RunService.Heartbeat:Connect(function(dt)
-        local elapsed = tick() - startTick
-        if elapsed >= totalDur or not emoji.Parent then
-            c:Disconnect()
-            if emoji and emoji.Parent then
-                emoji:Destroy()
-            end
-            return
-        end
-        local newY = emoji.Position.Y.Scale - vertSpeed * dt
-        local newX
-        if spring then
-            spring:update(dt)
-            newX = spring:get_position()
-        else
-            xPos = xPos + (xGoal - xPos) * dt * 1.5
-            newX = xPos
-        end
-        emoji.Position = UDim2.fromScale(newX, newY)
-        if elapsed >= fadeStart then
-            emoji.ImageTransparency = (elapsed - fadeStart) / (totalDur - fadeStart)
-        end
-    end)
-end
-
-local reactionLoop = nil
-local function startReactionLoop()
-    if reactionLoop then return end
-    if #_emojiReactions == 0 then return end
-    reactionLoop = task.spawn(function()
-        while mockState.active do
-            task.wait(math.random(8, 20) / 10)
-            if mockState.active and mockState.trade and #_emojiReactions > 0 then
-                pcall(_spawnReaction, _emojiReactions[math.random(1, #_emojiReactions)])
-            end
-        end
-        reactionLoop = nil
-    end)
-end
-
-local function stopReactionLoop()
-    if reactionLoop then
-        task.cancel(reactionLoop)
-        reactionLoop = nil
-    end
-end
 
 -- =====================================================================
 -- CHAT MESSAGES
@@ -1268,7 +789,6 @@ local CHAT_MESSAGES = {
     "Pick any of my pets!",
     "Inside of my inventory is a bat dragon, can I spin it?",
     "Now can I please have my dream pet",
-    "Tell me what I can get from boosting this please!!!!",
     "OH PUT IT DOWN",
     "RICH OMGGGG",
     "can we be besties",
@@ -1276,7 +796,7 @@ local CHAT_MESSAGES = {
 }
 
 -- =====================================================================
--- PC DESKTOP GUI
+-- DESKTOP GUI (Level 2 Compatible)
 -- =====================================================================
 local function createPCGUI()
     local screenGui = Instance.new("ScreenGui")
@@ -1287,14 +807,13 @@ local function createPCGUI()
 
     -- Main Window
     local mainFrame = Instance.new("Frame")
-    mainFrame.Size = UDim2.new(0, 520, 0, 620)
-    mainFrame.Position = UDim2.new(0.5, -260, 0.5, -310)
+    mainFrame.Size = UDim2.new(0, 500, 0, 600)
+    mainFrame.Position = UDim2.new(0.5, -250, 0.5, -300)
     mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
     mainFrame.BorderSizePixel = 0
     mainFrame.Parent = screenGui
     Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 14)
 
-    -- Window Stroke
     local mainStroke = Instance.new("UIStroke")
     mainStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
     mainStroke.Color = Color3.fromRGB(108, 75, 171)
@@ -1313,7 +832,7 @@ local function createPCGUI()
     titleLabel.Size = UDim2.new(1, -100, 1, 0)
     titleLabel.Position = UDim2.new(0, 14, 0, 0)
     titleLabel.BackgroundTransparency = 1
-    titleLabel.Text = "☀ OMNI XENO PC v3.0"
+    titleLabel.Text = "☀ OMNI XENO PC v4.0"
     titleLabel.Font = Enum.Font.FredokaOne
     titleLabel.TextSize = 18
     titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -1332,10 +851,7 @@ local function createPCGUI()
     closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     closeBtn.Parent = titleBar
     Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 8)
-
-    closeBtn.MouseButton1Click:Connect(function()
-        screenGui:Destroy()
-    end)
+    closeBtn.MouseButton1Click:Connect(function() screenGui:Destroy() end)
 
     -- Minimize Button
     local minBtn = Instance.new("TextButton")
@@ -1353,8 +869,8 @@ local function createPCGUI()
     local minimized = false
     minBtn.MouseButton1Click:Connect(function()
         minimized = not minimized
-        mainFrame.Size = minimized and UDim2.new(0, 520, 0, 44) or UDim2.new(0, 520, 0, 620)
-        mainFrame.Position = minimized and UDim2.new(0.5, -260, 0.5, -22) or UDim2.new(0.5, -260, 0.5, -310)
+        mainFrame.Size = minimized and UDim2.new(0, 500, 0, 44) or UDim2.new(0, 500, 0, 600)
+        mainFrame.Position = minimized and UDim2.new(0.5, -250, 0.5, -22) or UDim2.new(0.5, -250, 0.5, -300)
         for _, child in ipairs(mainFrame:GetChildren()) do
             if child ~= titleBar then
                 child.Visible = not minimized
@@ -1399,7 +915,6 @@ local function createPCGUI()
 
         tabButtons[name] = { btn = btn, stroke = stroke }
 
-        -- Content frame
         local content = Instance.new("ScrollingFrame")
         content.Size = UDim2.new(1, -20, 1, -100)
         content.Position = UDim2.new(0, 10, 0, 96)
