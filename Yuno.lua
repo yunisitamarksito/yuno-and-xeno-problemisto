@@ -1,4 +1,13 @@
+-- =====================================================================
+-- NyxHub — Adopt Me Fake Trade + Pet Spawner
+-- Hardened for Xeno / Solara / Wave (PC external executors)
+-- - anti-tamper removed (was killing GUI)
+-- - setthreadidentity / hookfunction / getrawmetatable / getconnections optional
+-- - NeonVFXHelper always stubbed (prevents crash on weak UNC)
+-- Run in Adopt Me only. Inject after fully loaded.
+-- =====================================================================
 
+-- Executor compatibility layer (Xeno PC + common alternatives)
 do
     local env = (getgenv and getgenv()) or _G
     -- request polyfill
@@ -65,20 +74,56 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService       = game:GetService("HttpService")
 local RunService        = game:GetService("RunService")
 pcall(function() setthreadidentity(2) end)
+
+-- Startup banner (confirms execution on Xeno)
+pcall(function()
+    print("[NyxHub] loading... executor:", (identifyexecutor and identifyexecutor()) or (getexecutorname and getexecutorname()) or "unknown")
+end)
+
 -- =====================================================================
 -- MODULE LOADING
 -- =====================================================================
 local Fsys
 local load
 do
-    local ok, res = pcall(function()
-        return require(ReplicatedStorage:WaitForChild("Fsys", 30))
-    end)
-    if not ok or not res then
-        error("[NyxHub] Fsys not found — join Adopt Me fully before injecting")
+    local res, lastErr
+    for attempt = 1, 40 do
+        local ok, r = pcall(function()
+            local f = ReplicatedStorage:FindFirstChild("Fsys") or ReplicatedStorage:WaitForChild("Fsys", 2)
+            if not f then error("Fsys missing") end
+            return require(f)
+        end)
+        if ok and r and r.load then
+            res = r
+            break
+        end
+        lastErr = r
+        task.wait(0.5)
     end
-    Fsys = res
-    load = Fsys.load
+    if not res then
+        warn("[NyxHub] Fsys require failed:", lastErr)
+        warn("[NyxHub] Xeno may block require() on game modules. Trying alternate...")
+        -- last resort: some executors expose getrenv().require
+        local ok2, r2 = pcall(function()
+            local req = (getrenv and getrenv().require) or require
+            return req(ReplicatedStorage:WaitForChild("Fsys", 5))
+        end)
+        if ok2 and r2 and r2.load then
+            res = r2
+        end
+    end
+    if not res then
+        warn("[NyxHub] CRITICAL: cannot load Fsys — script will run in limited mode")
+        -- stub so rest of script doesn't die
+        Fsys = { load = function(name)
+            warn("[NyxHub] stub load:", name)
+            return setmetatable({}, { __index = function() return function() end end })
+        end }
+        load = Fsys.load
+    else
+        Fsys = res
+        load = Fsys.load
+    end
 end
 
 -- Root cause of NeonVFXHelper crash: Fsys runs at high thread identity (6+), and
@@ -156,8 +201,30 @@ local ClientData  = safeLoad("ClientData")
 local TableUtil   = safeLoad("TableUtil")
 local InventoryDB = safeLoad("InventoryDB")
 if not UIManager or not ClientData or not InventoryDB then
-    error("[NyxHub] core modules missing — wait until Adopt Me fully loads, then reinject")
+    warn("[NyxHub] core modules missing — limited mode. Wait for full load and reinject.")
+    -- keep going; GUI may still open, features may no-op
 end
+if not UIManager then
+    UIManager = {
+        apps = {},
+        wait_for_initialization = function() end,
+        set_app_visibility = function() end,
+        is_visible = function() return false end,
+        wrap = function() return { start = function() end } end,
+    }
+end
+if not ClientData then
+    ClientData = {
+        get = function() return {} end,
+        get_data = function() return {} end,
+        get_server = function() return {} end,
+        predict = function() end,
+    }
+end
+if not InventoryDB then
+    InventoryDB = { pets = {} }
+end
+
 if UIManager.wait_for_initialization then
     pcall(function() UIManager:wait_for_initialization() end)
 else
@@ -1708,7 +1775,21 @@ end
 -- =====================================================================
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "MockTradeControl"; screenGui.ResetOnSpawn = false; screenGui.DisplayOrder = 10
-screenGui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
+do
+    local pg = Players.LocalPlayer:FindFirstChild("PlayerGui") or Players.LocalPlayer:WaitForChild("PlayerGui", 20)
+    if pg then
+        screenGui.Parent = pg
+        print("[NyxHub] GUI parented")
+    else
+        warn("[NyxHub] PlayerGui not found")
+        screenGui.Parent = game:GetService("CoreGui") -- fallback some executors allow
+    end
+end
+pcall(function()
+    if syn and syn.protect_gui then syn.protect_gui(screenGui) end
+    if gethui then screenGui.Parent = gethui() end
+end)
+
 local blackFrame = Instance.new("Frame")
 blackFrame.Name = "BlackFrame"; blackFrame.Size = UDim2.new(0, 206, 0, 706); blackFrame.Position = UDim2.new(0, 10, 0.5, -353)
 blackFrame.BackgroundColor3 = Color3.new(0,0,0); blackFrame.BorderSizePixel = 0; blackFrame.ZIndex = 0; blackFrame.Parent = screenGui
@@ -3335,6 +3416,7 @@ selectPartnerBtn.MouseButton1Click:Connect(function()
             CONFIG.PARTNER_NAME = partner.Name
             task.spawn(updatePartnerFromUsername, partner.Name)
             setActiveTab("Control")
+pcall(function() print("[NyxHub] ready — GUI should be visible") end)
             -- hint removed
         end
     end)
